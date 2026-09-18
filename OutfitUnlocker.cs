@@ -11,7 +11,7 @@ using System.Windows.Forms;
 [assembly:System.Reflection.AssemblyTitle("AlphaWolf's Deathloop Skin Unlocker")]
 [assembly:System.Reflection.AssemblyProduct("Deathloop Skin Unlocker")]
 [assembly:System.Reflection.AssemblyCompany("AlphaWolf")]
-[assembly:System.Reflection.AssemblyVersion("1.0.1.0")]
+[assembly:System.Reflection.AssemblyVersion("1.0.2.0")]
 namespace AlphaWolfUnlocker {
 sealed class Mem : IDisposable {
  [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint a,bool b,int c);
@@ -33,14 +33,17 @@ sealed class Mem : IDisposable {
  public long Allocate(){long p=VirtualAllocEx(handle,IntPtr.Zero,(UIntPtr)8192,0x3000,4).ToInt64();if(p==0)throw new Exception("Could not allocate callback");return p;}
  public uint Protect(long a,int n,uint p){uint old;if(!VirtualProtectEx(handle,new IntPtr(a),(UIntPtr)n,p,out old))throw new Exception("Could not prepare menu refresh");return old;}
  public void Flush(long a,int n){FlushInstructionCache(handle,new IntPtr(a),(UIntPtr)n);}
- public IEnumerable<long> Find(long value,CancellationToken token){
+ public long ScannedBytes;
+ public IEnumerable<long> Find(long value,CancellationToken token,long start,long end){
   // Writable committed heap pages only; no debugger or game execution during discovery.
-  for(long at=65536;at<Base;){token.ThrowIfCancellationRequested();Region r;if(VirtualQueryEx(handle,new IntPtr(at),out r,(UIntPtr)Marshal.SizeOf(typeof(Region)))==UIntPtr.Zero)yield break;
+  byte first=(byte)value;
+  for(long at=Math.Max(65536,start);at<end;){token.ThrowIfCancellationRequested();Region r;if(VirtualQueryEx(handle,new IntPtr(at),out r,(UIntPtr)Marshal.SizeOf(typeof(Region)))==UIntPtr.Zero)yield break;
    long next=r.Address+r.Size;if(next<=at)yield break;
    uint p=r.Protection&255;
    if(r.State==0x1000&&(r.Protection&0x100)==0&&(p==4||p==8||p==0x40||p==0x80)){
-    for(long a=r.Address;a<next;a+=0x1000000){token.ThrowIfCancellationRequested();byte[] data=null;try{data=Read(a,(int)Math.Min(0x1000000,next-a));}catch{}if(data==null)continue;
-     for(int i=0;i+8<=data.Length;i+=8)if(BitConverter.ToInt64(data,i)==value)yield return a+i;
+    for(long a=at;a<Math.Min(next,end);a+=0x100000){token.ThrowIfCancellationRequested();byte[] data=null;try{data=Read(a,(int)Math.Min(0x100000,Math.Min(next,end)-a));}catch{}if(data==null)continue;
+     ScannedBytes+=data.Length;
+     for(int i=0;i+8<=data.Length;i+=8)if(data[i]==first&&BitConverter.ToInt64(data,i)==value)yield return a+i;
     }
    }at=next;
   }
@@ -49,9 +52,10 @@ sealed class Mem : IDisposable {
 }
 sealed class Item {public uint Id,Flags;public long Record,Definition;public string Path;}
 sealed class Engine : IDisposable {
- public string Status="Waiting for Deathloop";public Mem M;long menu,root,model;string stable="";DateTime stableAt;
+ public string Status="Waiting for Deathloop";public Mem M;long menu,root,model;string stable="";DateTime stableAt;bool refreshPending;
  readonly Dictionary<int,string> choices=new Dictionary<int,string>();
- public long MenuHint;
+ public long MenuHint;public bool Searching;
+ public string DisplayStatus {get{return Searching&&M!=null?"Finding outfit menu — "+(M.ScannedBytes/1048576)+" MB checked":Status;}}
  public bool ValidMenu(long p){try{return p>65536&&M.Q(p)==M.Base+0x26880F0&&M.Q(p+0x2E0)>65536&&M.U(p+0x334)<=64&&M.U(p+0x344)<=64;}catch{return false;}}
  Dictionary<int,List<Item>> Inventory(){var result=new Dictionary<int,List<Item>>();foreach(int c in new[]{1,3}){long a=root+0x590+c*0xA0;if(M.U(a+0x60)!=c)throw new Exception("Waiting for player inventory");uint n=M.U(a+0x1C);if(n>10000)throw new Exception("Waiting for player inventory");long arr=M.Q(a+0x10);var list=new List<Item>();for(int i=0;i<n;i++){long r=arr+i*0x58;if(M.U(r+0x10)!=4)continue;long d=M.Q(r+8);string name=M.Text(M.Q(d+8));if(!name.StartsWith("models/equipment/outfits/player_outfit_")||!name.EndsWith(".outfitinventoryitem"))throw new Exception("Outfit layout not recognized");list.Add(new Item{Id=M.U(r),Record=r,Definition=d,Flags=M.U(r+0x18),Path=name});}if(list.Count==0||list.Count>64)throw new Exception("Waiting for outfits");result[c]=list;}return result;}
  long Requirement(long manager,ushort id){uint mask=M.U(manager+0x30);if(mask==0||mask>65535)throw new Exception("Waiting for outfit requirements");long p=M.Q(M.Q(manager+0x20)+(id&mask)*8);for(int i=0;i<100&&p!=0;i++){ushort key=M.W(p);if(key==id)return p+4;if(key>id)return 0;p=M.Q(p+8);}return 0;}
@@ -66,11 +70,17 @@ sealed class Engine : IDisposable {
   root=M.Q(M.Q(M.Base+0x333A150));if(root==0){stable="";Status="Waiting for player profile";return;}
   if(!ValidMenu(menu)){
    if(ValidMenu(MenuHint))menu=MenuHint;
-   else {Status="Locating the outfit menu";foreach(long p in M.Find(M.Base+0x26880F0,token)){if(ValidMenu(p)){menu=p;break;}}}
+   else {Status="Finding outfit menu";Searching=true;M.ScannedBytes=0;try{
+    // The live menu is commonly allocated near the current game object.
+    // Search there first, then retain the full heap search for other layouts.
+    long nearStart=Math.Max(65536,(game&~65535L)-0x2000000),nearEnd=Math.Min(M.Base,(game&~65535L)+0x4000000);
+    foreach(long p in M.Find(M.Base+0x26880F0,token,nearStart,nearEnd)){if(ValidMenu(p)){menu=p;break;}}
+    if(!ValidMenu(menu))foreach(long p in M.Find(M.Base+0x26880F0,token,65536,M.Base)){if(ValidMenu(p)){menu=p;break;}}
+   }finally{Searching=false;}}
    if(!ValidMenu(menu)){Status="Waiting for loadout menu";return;}stable="";
   }
   model=M.Q(menu+0x2E0);string sig=root+":"+game+":"+model;
-  if(sig!=stable){stable=sig;stableAt=DateTime.UtcNow;Status="Preparing outfit menu";return;}
+  if(sig!=stable){stable=sig;stableAt=DateTime.UtcNow;refreshPending=true;Status="Preparing outfit menu";return;}
   if((DateTime.UtcNow-stableAt).TotalSeconds<1.2)return;
   var inventories=Inventory();long manager=M.Q(game+0x34E8);if(manager==0){Status="Waiting for outfits";return;}
   var patches=new Dictionary<long,uint>();bool rebuild=false;
@@ -82,11 +92,12 @@ sealed class Engine : IDisposable {
     Item desired=items.FirstOrDefault(x=>x.Path==remembered);if(desired!=null&&desired.Id!=selected){patches[a+0x58]=desired.Id;rebuild=true;}
    }else if(!reset&&selectedItem!=null){choices[c]=selectedItem.Path;}
   }
-  if(patches.Count!=0||rebuild){if(M.Q(M.Base+0x5BD1010)!=game||M.Q(M.Q(M.Base+0x333A150))!=root||M.Q(menu+0x2E0)!=model)throw new Exception("Loading — waiting for stable menu");
+  if(patches.Count!=0||rebuild)refreshPending=true;
+  if(refreshPending){if(M.Q(M.Base+0x5BD1010)!=game||M.Q(M.Q(M.Base+0x333A150))!=root||M.Q(menu+0x2E0)!=model)throw new Exception("Loading — waiting for stable menu");
    var before=patches.ToDictionary(p=>p.Key,p=>M.U(p.Key));var written=new List<long>();try{foreach(var p in patches){if(M.U(p.Key)!=before[p.Key])throw new Exception("Loading — outfit data changed");written.Add(p.Key);M.Set(p.Key,p.Value);}}catch{foreach(long p in written.AsEnumerable().Reverse())try{if(M.U(p)==patches[p])M.Set(p,before[p]);}catch{}throw;}
-   Refresh();foreach(var pair in inventories)if(!MenuIds(pair.Key).IsSupersetOf(pair.Value.Select(x=>x.Id)))throw new Exception("Menu refresh incomplete; retrying");
+   Refresh();foreach(var pair in inventories)if(!MenuIds(pair.Key).IsSupersetOf(pair.Value.Select(x=>x.Id)))throw new Exception("Menu refresh incomplete; retrying");refreshPending=false;
   }
-  Status="Outfits unlocked — choose them in the game";
+  Status="Ready: Colt "+inventories[1].Count+", Julianna "+inventories[3].Count+" — reopen outfit screen if unchanged";
  }
  void Refresh(){
   long b=M.Base,iat=b+0x231DB48,original=M.Q(iat);if(original!=M.Q(b+0x20DC4628))throw new Exception("Another tool is using the menu callback");
@@ -111,11 +122,11 @@ sealed class Engine : IDisposable {
 sealed class Tray : ApplicationContext {
  readonly Engine engine=new Engine();readonly NotifyIcon icon=new NotifyIcon();readonly ContextMenuStrip menu=new ContextMenuStrip();readonly ToolStripMenuItem status=new ToolStripMenuItem("Waiting for Deathloop");readonly ToolStripMenuItem enabled=new ToolStripMenuItem("Keep outfits unlocked");readonly System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();readonly CancellationTokenSource cancel=new CancellationTokenSource();bool busy,closing,finished;
  public Tray(long menuHint,bool smoke=false){engine.MenuHint=menuHint;status.Enabled=false;enabled.Checked=true;enabled.CheckOnClick=true;
-  var title=new ToolStripMenuItem("AlphaWolf's Deathloop Skin Unlocker"){Enabled=false};menu.Items.Add(title);menu.Items.Add(status);menu.Items.Add(new ToolStripSeparator());menu.Items.Add(enabled);menu.Items.Add("Exit",null,(s,e)=>Stop());
-  icon.Icon=SystemIcons.Application;icon.Text="AlphaWolf's Deathloop Skin Unlocker";icon.ContextMenuStrip=menu;icon.Visible=true;
+  menu.Items.Add(status);menu.Items.Add(new ToolStripSeparator());menu.Items.Add(enabled);menu.Items.Add("Exit",null,(s,e)=>Stop());
+  icon.Icon=Icon.ExtractAssociatedIcon(Application.ExecutablePath);icon.Text="AlphaWolf's Deathloop Skin Unlocker";icon.ContextMenuStrip=menu;icon.Visible=true;
   timer.Interval=500;timer.Tick+=async(s,e)=>await Tick();if(!smoke)timer.Start();
  }
- async Task Tick(){if(busy||closing)return;if(!enabled.Checked){status.Text="Paused";return;}busy=true;try{var work=Task.Run(()=>{try{engine.Step(cancel.Token);}catch(OperationCanceledException){}catch(Exception e){engine.Error(e);}});while(!work.IsCompleted){status.Text=engine.Status;await Task.Delay(200);}await work;status.Text=engine.Status;}finally{busy=false;if(closing)Finish();}}
+ async Task Tick(){if(busy||closing)return;if(!enabled.Checked){status.Text="Paused";return;}busy=true;try{var work=Task.Run(()=>{try{engine.Step(cancel.Token);}catch(OperationCanceledException){}catch(Exception e){engine.Error(e);}});while(!work.IsCompleted){status.Text=engine.DisplayStatus;await Task.Delay(200);}await work;status.Text=engine.DisplayStatus;}finally{busy=false;if(closing)Finish();}}
  void Stop(){closing=true;timer.Stop();cancel.Cancel();if(!busy)Finish();}
  void Finish(){if(finished)return;finished=true;icon.Visible=false;engine.Dispose();ExitThread();}
  protected override void Dispose(bool disposing){if(disposing){timer.Stop();cancel.Cancel();icon.Visible=false;icon.Dispose();timer.Dispose();menu.Dispose();if(!busy)engine.Dispose();cancel.Dispose();}base.Dispose(disposing);}
