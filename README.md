@@ -20,9 +20,8 @@ are handled automatically. If access is denied, run the unlocker as administrato
 No Cheat Engine, Python, or anti-cheat disabling is required.
 Unlocks are maintained while the app runs; this does not permanently grant account entitlements.
 
-Settings, logs, and save backups are kept in `%LOCALAPPDATA%\AlphaWolf\Skinchanger`
-(the existing settings location is retained for compatibility).
-A save backup is created before the first change in each attached game session.
+The app creates no settings files, logs, or save backups. Outfit choices are
+remembered only in memory while it runs.
 
 ## Build
 

@@ -2,18 +2,16 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web.Script.Serialization;
 using System.Windows.Forms;
 [assembly:System.Reflection.AssemblyTitle("AlphaWolf's Deathloop Skin Unlocker")]
 [assembly:System.Reflection.AssemblyProduct("Deathloop Skin Unlocker")]
 [assembly:System.Reflection.AssemblyCompany("AlphaWolf")]
-[assembly:System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly:System.Reflection.AssemblyVersion("1.0.1.0")]
 namespace AlphaWolfUnlocker {
 sealed class Mem : IDisposable {
  [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint a,bool b,int c);
@@ -51,20 +49,15 @@ sealed class Mem : IDisposable {
 }
 sealed class Item {public uint Id,Flags;public long Record,Definition;public string Path;}
 sealed class Engine : IDisposable {
- public string Status="Waiting for Deathloop";public Mem M;long menu,root,model;string stable="";DateTime stableAt;bool backedUp;
+ public string Status="Waiting for Deathloop";public Mem M;long menu,root,model;string stable="";DateTime stableAt;
  readonly Dictionary<int,string> choices=new Dictionary<int,string>();
- readonly string storage=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AlphaWolf","Skinchanger");
- string previousLog="";public long MenuHint;
- public Engine(){Directory.CreateDirectory(storage);try{var saved=new JavaScriptSerializer().Deserialize<Dictionary<string,string>>(File.ReadAllText(Path.Combine(storage,"outfits.json")));foreach(var p in saved)choices[int.Parse(p.Key)]=p.Value;}catch{}}
- void Log(string s){if(s==previousLog)return;previousLog=s;string path=Path.Combine(storage,"session.log");if(File.Exists(path)&&new FileInfo(path).Length>1048576)File.Move(path,path+"."+DateTime.UtcNow.Ticks);File.AppendAllText(path,DateTime.Now.ToString("s")+" "+s+Environment.NewLine);}
- void SaveChoices(){File.WriteAllText(Path.Combine(storage,"outfits.json"),new JavaScriptSerializer().Serialize(choices.ToDictionary(p=>p.Key.ToString(),p=>p.Value)));}
+ public long MenuHint;
  public bool ValidMenu(long p){try{return p>65536&&M.Q(p)==M.Base+0x26880F0&&M.Q(p+0x2E0)>65536&&M.U(p+0x334)<=64&&M.U(p+0x344)<=64;}catch{return false;}}
  Dictionary<int,List<Item>> Inventory(){var result=new Dictionary<int,List<Item>>();foreach(int c in new[]{1,3}){long a=root+0x590+c*0xA0;if(M.U(a+0x60)!=c)throw new Exception("Waiting for player inventory");uint n=M.U(a+0x1C);if(n>10000)throw new Exception("Waiting for player inventory");long arr=M.Q(a+0x10);var list=new List<Item>();for(int i=0;i<n;i++){long r=arr+i*0x58;if(M.U(r+0x10)!=4)continue;long d=M.Q(r+8);string name=M.Text(M.Q(d+8));if(!name.StartsWith("models/equipment/outfits/player_outfit_")||!name.EndsWith(".outfitinventoryitem"))throw new Exception("Outfit layout not recognized");list.Add(new Item{Id=M.U(r),Record=r,Definition=d,Flags=M.U(r+0x18),Path=name});}if(list.Count==0||list.Count>64)throw new Exception("Waiting for outfits");result[c]=list;}return result;}
  long Requirement(long manager,ushort id){uint mask=M.U(manager+0x30);if(mask==0||mask>65535)throw new Exception("Waiting for outfit requirements");long p=M.Q(M.Q(manager+0x20)+(id&mask)*8);for(int i=0;i<100&&p!=0;i++){ushort key=M.W(p);if(key==id)return p+4;if(key>id)return 0;p=M.Q(p+8);}return 0;}
  HashSet<uint> MenuIds(int c){long h=menu+(c==1?0x328:0x338);uint n=M.U(h+12);if(n>64)throw new Exception("Waiting for menu data");long a=M.Q(h);var ids=new HashSet<uint>();for(int i=0;i<n;i++)ids.Add(M.U(a+i*4));return ids;}
- void Backup(){if(backedUp)return;string src=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"Saved Games","Arkane Studios","Deathloop","base","savegame");if(!Directory.Exists(src))throw new Exception("Save folder not found; no changes made");string dest=Path.Combine(storage,"Backups",DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));foreach(string f in Directory.GetFiles(src,"*",SearchOption.AllDirectories)){string target=Path.Combine(dest,f.Substring(src.Length+1));Directory.CreateDirectory(Path.GetDirectoryName(target));File.Copy(f,target);}backedUp=true;Log("Save backup: "+dest);}
  public void Step(CancellationToken token){
-  if(M==null||M.Process.HasExited){if(M!=null)M.Dispose();M=null;menu=0;stable="";backedUp=false;var ps=Process.GetProcessesByName("Deathloop");if(ps.Length==0){Status="Waiting for Deathloop";return;}if(ps.Length!=1){foreach(var p in ps)p.Dispose();throw new Exception("More than one Deathloop process is running");}M=new Mem(ps[0]);Log("Attached to "+M.Process.Id);}
+  if(M==null||M.Process.HasExited){if(M!=null)M.Dispose();M=null;menu=0;stable="";var ps=Process.GetProcessesByName("Deathloop");if(ps.Length==0){Status="Waiting for Deathloop";return;}if(ps.Length!=1){foreach(var p in ps)p.Dispose();throw new Exception("More than one Deathloop process is running");}M=new Mem(ps[0]);}
   long game=M.Q(M.Base+0x5BD1010);
   // A null game pointer is NORMAL during loading. Never count it as failure or exit.
   if(game==0){stable="";Status="Loading — waiting for the game";return;}
@@ -74,25 +67,24 @@ sealed class Engine : IDisposable {
   if(!ValidMenu(menu)){
    if(ValidMenu(MenuHint))menu=MenuHint;
    else {Status="Locating the outfit menu";foreach(long p in M.Find(M.Base+0x26880F0,token)){if(ValidMenu(p)){menu=p;break;}}}
-   if(!ValidMenu(menu)){Status="Waiting for loadout menu";return;}Log("Menu "+menu.ToString("X"));stable="";
+   if(!ValidMenu(menu)){Status="Waiting for loadout menu";return;}stable="";
   }
   model=M.Q(menu+0x2E0);string sig=root+":"+game+":"+model;
   if(sig!=stable){stable=sig;stableAt=DateTime.UtcNow;Status="Preparing outfit menu";return;}
   if((DateTime.UtcNow-stableAt).TotalSeconds<1.2)return;
   var inventories=Inventory();long manager=M.Q(game+0x34E8);if(manager==0){Status="Waiting for outfits";return;}
-  var patches=new Dictionary<long,uint>();bool rebuild=false,selectionChanged=false;
+  var patches=new Dictionary<long,uint>();bool rebuild=false;
   foreach(var entry in inventories){int c=entry.Key;var items=entry.Value;long a=root+0x590+c*0xA0;uint selected=M.U(a+0x58);bool reset=items.Any(x=>(x.Flags&8)!=0);var selectedItem=items.FirstOrDefault(x=>x.Id==selected);var ids=MenuIds(c);
    foreach(var item in items){long req=Requirement(manager,M.W(item.Definition+0x2A0));if(req!=0&&M.U(req)!=0)patches[req]=0;if((item.Flags&8)!=0)patches[item.Record+0x18]=(item.Flags&~8u)|2u;if(!ids.Contains(item.Id))rebuild=true;}
    string remembered;string defaultPath="models/equipment/outfits/player_outfit_"+(c==1?"berezin_a01":"julianna_a01")+"_item.outfitinventoryitem";
    // Restore only a transition fallback, not a deliberate selection in an already-unlocked menu.
    if(reset&&selectedItem!=null&&selectedItem.Path==defaultPath&&choices.TryGetValue(c,out remembered)){
     Item desired=items.FirstOrDefault(x=>x.Path==remembered);if(desired!=null&&desired.Id!=selected){patches[a+0x58]=desired.Id;rebuild=true;}
-   }else if(!reset&&selectedItem!=null){if(!choices.TryGetValue(c,out remembered)||remembered!=selectedItem.Path){choices[c]=selectedItem.Path;selectionChanged=true;}}
+   }else if(!reset&&selectedItem!=null){choices[c]=selectedItem.Path;}
   }
-  if(selectionChanged){SaveChoices();Log("Remembered in-game outfit selection");}
-  if(patches.Count!=0||rebuild){Backup();if(M.Q(M.Base+0x5BD1010)!=game||M.Q(M.Q(M.Base+0x333A150))!=root||M.Q(menu+0x2E0)!=model)throw new Exception("Loading — waiting for stable menu");
+  if(patches.Count!=0||rebuild){if(M.Q(M.Base+0x5BD1010)!=game||M.Q(M.Q(M.Base+0x333A150))!=root||M.Q(menu+0x2E0)!=model)throw new Exception("Loading — waiting for stable menu");
    var before=patches.ToDictionary(p=>p.Key,p=>M.U(p.Key));var written=new List<long>();try{foreach(var p in patches){if(M.U(p.Key)!=before[p.Key])throw new Exception("Loading — outfit data changed");written.Add(p.Key);M.Set(p.Key,p.Value);}}catch{foreach(long p in written.AsEnumerable().Reverse())try{if(M.U(p)==patches[p])M.Set(p,before[p]);}catch{}throw;}
-   Refresh();foreach(var pair in inventories)if(!MenuIds(pair.Key).IsSupersetOf(pair.Value.Select(x=>x.Id)))throw new Exception("Menu refresh incomplete; retrying");Log("Unlocked and rebuilt Colt/Julianna outfit menus");
+   Refresh();foreach(var pair in inventories)if(!MenuIds(pair.Key).IsSupersetOf(pair.Value.Select(x=>x.Id)))throw new Exception("Menu refresh incomplete; retrying");
   }
   Status="Outfits unlocked — choose them in the game";
  }
@@ -113,7 +105,7 @@ sealed class Engine : IDisposable {
   finally{if(M.Q(iat)==block)M.Write(iat,BitConverter.GetBytes(original));M.Protect(iat,8,protection);}
   // Keep 8 KiB allocated until process exit: another message-pump call may still be returning.
  }
- public void Error(Exception e){stable="";Status=e.Message;Log(e.Message);}
+ public void Error(Exception e){stable="";Status=e.Message;}
  public void Dispose(){if(M!=null){M.Dispose();M=null;}}
 }
 sealed class Tray : ApplicationContext {
